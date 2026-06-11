@@ -1,6 +1,7 @@
 # Financial Transaction Fraud Detection
 
 [![tests](https://github.com/aldeeian/fraud-detection-ml/actions/workflows/tests.yml/badge.svg)](https://github.com/aldeeian/fraud-detection-ml/actions/workflows/tests.yml)
+[![live demo](https://img.shields.io/badge/live%20demo-fraud--detection--saif.streamlit.app-FF4B4B?logo=streamlit&logoColor=white)](https://fraud-detection-saif.streamlit.app/)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Models](https://img.shields.io/badge/models-XGBoost%20%7C%20LSTM%20%7C%20Isolation%20Forest-green)
 
