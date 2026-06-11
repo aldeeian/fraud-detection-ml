@@ -28,10 +28,18 @@ from xgboost import XGBClassifier
 # SMOTE creates synthetic fraud examples so the model sees a balanced dataset.
 from imblearn.over_sampling import SMOTE
 
-# ── PyTorch ───────────────────────────────────────────────────────────────────
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+# ── PyTorch (optional) ───────────────────────────────────────────────────────
+# The LSTM is the only model that needs torch. If torch is not installed the
+# rest of the system (Isolation Forest, XGBoost, dashboard) still works, and
+# the LSTM is simply skipped. This keeps the install light for people who only
+# want the tabular models.
+try:
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+    TORCH_AVAILABLE = True
+except Exception:  # ImportError, or OSError from a broken install
+    TORCH_AVAILABLE = False
 
 
 MODELS_DIR = Path('models')
@@ -42,29 +50,43 @@ MODELS_DIR.mkdir(exist_ok=True)
 # 1. ISOLATION FOREST  (unsupervised baseline)
 # ═════════════════════════════════════════════════════════════════════════════
 
-def train_isolation_forest(X: np.ndarray, contamination: float = 0.013):
+def train_isolation_forest(X: np.ndarray, y: np.ndarray | None = None,
+                           contamination: float = 0.013):
     """
-    Train an Isolation Forest anomaly detector.
+    Train an Isolation Forest anomaly detector (unsupervised baseline).
 
     How it works: Build many random decision trees. Normal points need many
-    splits to isolate; anomalous (fraudulent) points are isolated quickly with
-    few splits. "Isolation score" = how quickly a point got isolated.
+    splits to isolate; anomalous points are isolated quickly with few splits.
+
+    Two important details for an honest baseline:
+      - Isolation Forest does NOT need feature scaling (it splits on raw values),
+        so we train it on the unscaled matrix.
+      - If labels are available we fit on NORMAL transactions only. This is the
+        proper "novelty detection" setup: the model learns what normal looks
+        like, then flags anything that deviates.
+
+    This model is expected to be the WEAKEST of the three. Fraud here is
+    designed to mimic normal transactions, so a purely unsupervised detector
+    catches only the obvious cases. That gap is exactly why banks rely on
+    supervised models (XGBoost) trained on labelled fraud.
 
     Args:
-        X:             Feature matrix (all rows — no labels needed!)
-        contamination: Expected fraction of fraud (matches our ~1.3% rate)
+        X:             Unscaled feature matrix
+        y:             Optional labels. If given, fit on normal rows only.
+        contamination: Expected fraction of anomalies
 
     Returns:
         Fitted IsolationForest model
     """
-    print("Training Isolation Forest...")
+    print("Training Isolation Forest (unsupervised baseline)...")
+    X_fit = X if y is None else X[y == 0]
     model = IsolationForest(
-        n_estimators=100,      # number of trees — more = better but slower
+        n_estimators=200,
         contamination=contamination,
         random_state=42,
-        n_jobs=-1,             # use all CPU cores
+        n_jobs=-1,
     )
-    model.fit(X)
+    model.fit(X_fit)
 
     joblib.dump(model, MODELS_DIR / 'isolation_forest.joblib')
     print("  Saved -> models/isolation_forest.joblib")
@@ -166,54 +188,64 @@ def predict_xgboost(model: XGBClassifier, X: np.ndarray, feature_names: list | N
 # 3. LSTM (PyTorch deep learning model)
 # ═════════════════════════════════════════════════════════════════════════════
 
-class FraudLSTM(nn.Module):
-    """
-    A simple LSTM neural network for fraud classification.
+if TORCH_AVAILABLE:
+    class FraudLSTM(nn.Module):
+        """
+        A simple LSTM neural network for fraud classification.
 
-    Architecture:
-        Input  → LSTM layers → Dropout → Fully Connected → Sigmoid output
+        Architecture:
+            Input  → LSTM layers → Dropout → Fully Connected → Sigmoid output
 
-    We treat each transaction's feature vector as a sequence of length = n_features,
-    where each feature is one time step. This is a common educational simplification
-    that lets us demonstrate LSTM without needing account-level transaction histories.
+        We treat each transaction's feature vector as a sequence of length = n_features,
+        where each feature is one time step. This is a common educational simplification
+        that lets us demonstrate LSTM without needing account-level transaction histories.
 
-    In production, you'd group transactions by account and feed real sequences.
-    """
+        In production, you'd group transactions by account and feed real sequences.
+        """
 
-    def __init__(self, input_size: int = 1, hidden_size: int = 64,
-                 num_layers: int = 2, dropout: float = 0.3):
-        super().__init__()
+        def __init__(self, input_size: int = 1, hidden_size: int = 64,
+                     num_layers: int = 2, dropout: float = 0.3):
+            super().__init__()
 
-        self.hidden_size = hidden_size
-        self.num_layers  = num_layers
+            self.hidden_size = hidden_size
+            self.num_layers  = num_layers
 
-        # LSTM: processes the sequence step-by-step, remembering important past steps
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,      # shape: (batch, seq_len, features)
-            dropout=dropout if num_layers > 1 else 0,
-        )
+            # LSTM: processes the sequence step-by-step, remembering important past steps
+            self.lstm = nn.LSTM(
+                input_size=input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                batch_first=True,      # shape: (batch, seq_len, features)
+                dropout=dropout if num_layers > 1 else 0,
+            )
 
-        # Dropout randomly zeroes some neurons during training → prevents overfitting
-        self.dropout = nn.Dropout(dropout)
+            # Dropout randomly zeroes some neurons during training → prevents overfitting
+            self.dropout = nn.Dropout(dropout)
 
-        # Fully connected layer: maps LSTM output to a single fraud probability
-        self.fc = nn.Linear(hidden_size, 1)
+            # Fully connected layer: maps LSTM output to a single fraud probability
+            self.fc = nn.Linear(hidden_size, 1)
 
-        # Sigmoid squashes output to [0, 1] so we can interpret it as a probability
-        self.sigmoid = nn.Sigmoid()
+            # Sigmoid squashes output to [0, 1] so we can interpret it as a probability
+            self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, input_size)
-        lstm_out, _ = self.lstm(x)
-        # Take only the last time step's output
-        last_hidden = lstm_out[:, -1, :]
-        out = self.dropout(last_hidden)
-        out = self.fc(out)
-        out = self.sigmoid(out)
-        return out.squeeze(1)  # shape: (batch_size,)
+        def forward(self, x, return_logits: bool = False):
+            # x shape: (batch_size, seq_len, input_size)
+            lstm_out, _ = self.lstm(x)
+            # Take only the last time step's output
+            last_hidden = lstm_out[:, -1, :]
+            out = self.dropout(last_hidden)
+            logits = self.fc(out).squeeze(1)  # shape: (batch_size,)
+            # During training we return raw logits for BCEWithLogitsLoss (stable +
+            # supports pos_weight). During inference we apply sigmoid to get a
+            # probability in [0, 1].
+            if return_logits:
+                return logits
+            return self.sigmoid(logits)
+
+
+else:
+    class FraudLSTM:  # stub so type hints and imports do not crash
+        pass
 
 
 def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
@@ -234,6 +266,10 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
     Returns:
         Fitted FraudLSTM model
     """
+    if not TORCH_AVAILABLE:
+        print("PyTorch is not installed. Skipping LSTM (install torch to enable it).")
+        return None
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training LSTM on: {device}")
 
@@ -254,9 +290,12 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
     # ── Build model ───────────────────────────────────────────────────────────
     model = FraudLSTM(input_size=1, hidden_size=64, num_layers=2, dropout=0.3).to(device)
 
-    # BCEWithLogitsLoss is numerically stable binary cross-entropy loss.
-    # We use BCELoss (after sigmoid) because our model already applies sigmoid.
-    criterion = nn.BCELoss(weight=None)
+    # Class imbalance handling: weight the positive (fraud) class by how rare it
+    # is, so the network is penalised heavily for missing fraud. We compute the
+    # logits version (model outputs a probability via sigmoid, so we strip the
+    # final sigmoid for training and use BCEWithLogitsLoss, which is both
+    # numerically stable AND supports pos_weight).
+    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     # Adam optimiser: adapts the learning rate per-parameter (works well in practice)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     # Reduce learning rate if loss plateaus (helps convergence)
@@ -271,7 +310,7 @@ def train_lstm(X_train: np.ndarray, y_train: np.ndarray,
             y_batch = y_batch.to(device)
 
             optimizer.zero_grad()          # clear previous gradients
-            preds = model(X_batch)         # forward pass
+            preds = model(X_batch, return_logits=True)  # raw logits for stable loss
             loss  = criterion(preds, y_batch)  # compute loss
             loss.backward()                # backpropagation: compute gradients
             optimizer.step()               # update weights
@@ -298,6 +337,9 @@ def predict_lstm(model: FraudLSTM, X: np.ndarray, batch_size: int = 512):
         y_pred:  binary predictions
         y_proba: fraud probability for each transaction
     """
+    if not TORCH_AVAILABLE or model is None:
+        raise RuntimeError("LSTM unavailable: PyTorch is not installed or model not trained.")
+
     device = next(model.parameters()).device
     model.eval()  # disable dropout during inference
 
@@ -348,8 +390,11 @@ def train_all(X: np.ndarray, y: np.ndarray, feature_names: list | None = None):
         X_train, X_test, save_path='models/scaler.joblib'
     )
 
-    # Train all three
-    iso   = train_isolation_forest(X_train_s)
+    # Train all three.
+    # Isolation Forest: raw (unscaled) features, fit on normal rows only.
+    # XGBoost: raw features (tree model, robust to scale).
+    # LSTM: scaled features (neural nets need it).
+    iso   = train_isolation_forest(X_train, y_train)
     xgb   = train_xgboost(X_train, y_train, feature_names=feature_names)
     lstm  = train_lstm(X_train_s, y_train)
 

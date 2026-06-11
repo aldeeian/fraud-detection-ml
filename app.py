@@ -100,7 +100,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("2. Train Models")
     train_btn = st.button(
-        "Train All 3 Models",
+        "Train Models",
         type="primary",
         use_container_width=True,
         disabled=('df' not in st.session_state),
@@ -241,7 +241,7 @@ with tab2:
         if 'df' not in st.session_state:
             st.info("👈 Load data first, then train models.")
         else:
-            st.info("👈 Click 'Train All 3 Models' in the sidebar.")
+            st.info("👈 Click 'Train Models' in the sidebar.")
     else:
         eval_results = st.session_state['eval_results']
 
@@ -275,9 +275,58 @@ with tab2:
 
         st.markdown("---")
 
+        # ── Interactive decision threshold ───────────────────────────────────
+        st.subheader("Decision Threshold Explorer")
+        st.caption(
+            "A model outputs a fraud probability. The THRESHOLD decides when to act on it. "
+            "Lower threshold = catch more fraud but more false alarms. Drag the slider to "
+            "see the tradeoff live on the held-out test set (XGBoost)."
+        )
+        xgb_res   = eval_results['XGBoost']
+        y_t       = xgb_res['y_test']
+        y_p       = xgb_res['y_proba']
+        threshold = st.slider("Fraud probability threshold", 0.05, 0.95, 0.50, 0.05)
+        y_hat = (y_p >= threshold).astype(int)
+
+        tp = int(((y_hat == 1) & (y_t == 1)).sum())
+        fp = int(((y_hat == 1) & (y_t == 0)).sum())
+        fn = int(((y_hat == 0) & (y_t == 1)).sum())
+        prec_t = tp / (tp + fp) if (tp + fp) else 0.0
+        rec_t  = tp / (tp + fn) if (tp + fn) else 0.0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Frauds caught", f"{tp} / {tp + fn}")
+        c2.metric("False alarms", f"{fp:,}")
+        c3.metric("Precision", f"{prec_t:.1%}")
+        c4.metric("Recall", f"{rec_t:.1%}")
+
+        # ── Business impact estimate ─────────────────────────────────────────
+        df_loaded = st.session_state.get('df')
+        if df_loaded is not None:
+            fraud_amts = df_loaded.loc[df_loaded['isFraud'] == 1, 'amount']
+            avg_fraud  = float(fraud_amts.mean()) if len(fraud_amts) else 0.0
+            review_cost = 15.0  # rough cost of an analyst reviewing one alert
+            saved   = tp * avg_fraud
+            missed  = fn * avg_fraud
+            alerts  = (tp + fp) * review_cost
+
+            st.markdown("##### Estimated business impact at this threshold")
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Fraud losses prevented", f"${saved:,.0f}")
+            b2.metric("Fraud losses missed", f"${missed:,.0f}")
+            b3.metric("Alert review cost", f"${alerts:,.0f}",
+                      help="Assumes about $15 of analyst time per flagged transaction")
+            st.caption(
+                "Based on the average fraud amount in the loaded dataset "
+                f"(${avg_fraud:,.0f}). This is the tradeoff fraud teams tune every day: "
+                "moving the threshold trades analyst time against missed fraud."
+            )
+
+        st.markdown("---")
+
         # ── Per-model confusion matrices ─────────────────────────────────────
         st.subheader("Confusion Matrices")
-        cols = st.columns(3)
+        cols = st.columns(len(eval_results))
         for i, (model_name, result) in enumerate(eval_results.items()):
             with cols[i]:
                 fig = plot_confusion_matrix(result['y_test'], result['y_pred'], model_name)
@@ -332,6 +381,31 @@ with tab4:
     if 'train_results' not in st.session_state:
         st.warning("Train the models first (sidebar) before making predictions.")
     else:
+        # ── One-click example scenarios (fill the form automatically) ───────
+        st.markdown("**Quick examples** (click to fill the form):")
+        pcol1, pcol2, pcol3 = st.columns(3)
+        if pcol1.button("🚨 Typical fraud", use_container_width=True,
+                        help="Large transfer that drains the sender's account"):
+            st.session_state.update({
+                "p_step": 420, "p_type": "TRANSFER", "p_amount": 250000.0,
+                "p_old_orig": 260000.0, "p_new_orig": 0.0,
+                "p_old_dest": 0.0, "p_new_dest": 250000.0,
+            })
+        if pcol2.button("✅ Normal payment", use_container_width=True,
+                        help="Small everyday payment, balances reconcile"):
+            st.session_state.update({
+                "p_step": 300, "p_type": "PAYMENT", "p_amount": 50.0,
+                "p_old_orig": 2000.0, "p_new_orig": 1950.0,
+                "p_old_dest": 500.0, "p_new_dest": 550.0,
+            })
+        if pcol3.button("🕵️ Stealthy fraud", use_container_width=True,
+                        help="Fraud disguised as a normal transfer, the hard case"):
+            st.session_state.update({
+                "p_step": 660, "p_type": "CASH_OUT", "p_amount": 800.0,
+                "p_old_orig": 3500.0, "p_new_orig": 2700.0,
+                "p_old_dest": 100.0, "p_new_dest": 900.0,
+            })
+
         # ── Input form ───────────────────────────────────────────────────────
         with st.form("predict_form"):
             st.subheader("Transaction Details")
@@ -339,30 +413,23 @@ with tab4:
             col1, col2 = st.columns(2)
 
             with col1:
-                t_step   = st.number_input("Step (hour of simulation)", min_value=1, max_value=744, value=100)
-                t_type   = st.selectbox("Transaction Type", ['PAYMENT', 'TRANSFER', 'CASH_OUT', 'DEBIT', 'CASH_IN'])
-                t_amount = st.number_input("Amount ($)", min_value=0.0, value=5000.0, step=100.0)
+                t_step   = st.number_input("Step (hour of simulation)", min_value=1, max_value=744, value=100, key="p_step")
+                t_type   = st.selectbox("Transaction Type", ['PAYMENT', 'TRANSFER', 'CASH_OUT', 'DEBIT', 'CASH_IN'], key="p_type")
+                t_amount = st.number_input("Amount ($)", min_value=0.0, value=5000.0, step=100.0, key="p_amount")
                 t_name_orig = st.text_input("Sender Account (nameOrig)", value="C123456789")
 
             with col2:
-                t_old_orig = st.number_input("Sender Old Balance ($)", min_value=0.0, value=5000.0, step=100.0)
+                t_old_orig = st.number_input("Sender Old Balance ($)", min_value=0.0, value=5000.0, step=100.0, key="p_old_orig")
                 t_new_orig = st.number_input("Sender New Balance ($)", min_value=0.0, value=0.0, step=100.0,
-                                              help="Set to 0 to simulate a fraud pattern (account drained)")
+                                              help="Set to 0 to simulate a fraud pattern (account drained)",
+                                              key="p_new_orig")
                 t_name_dest   = st.text_input("Recipient Account (nameDest)", value="C987654321")
-                t_old_dest    = st.number_input("Recipient Old Balance ($)", min_value=0.0, value=0.0, step=100.0)
-                t_new_dest    = st.number_input("Recipient New Balance ($)", min_value=0.0, value=5000.0, step=100.0)
+                t_old_dest    = st.number_input("Recipient Old Balance ($)", min_value=0.0, value=0.0, step=100.0, key="p_old_dest")
+                t_new_dest    = st.number_input("Recipient New Balance ($)", min_value=0.0, value=5000.0, step=100.0, key="p_new_dest")
 
             t_flagged = st.checkbox("System-flagged as suspicious (isFlaggedFraud)", value=False)
 
             submitted = st.form_submit_button("Run Fraud Check", type="primary", use_container_width=True)
-
-        # ── Two preset scenarios ──────────────────────────────────────────────
-        st.markdown("---")
-        col_preset1, col_preset2 = st.columns(2)
-        with col_preset1:
-            st.info("**Typical fraud scenario:** Large TRANSFER that zeroes out the sender's balance. Set Amount=5000, Old Balance=5000, New Balance=0, Type=TRANSFER.")
-        with col_preset2:
-            st.info("**Typical legit scenario:** Small PAYMENT where sender balance decreases normally. Set Amount=50, Old Balance=2000, New Balance=1950, Type=PAYMENT.")
 
         # ── Run prediction ────────────────────────────────────────────────────
         if submitted:

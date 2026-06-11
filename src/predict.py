@@ -12,7 +12,11 @@ during training is also loaded so new data is transformed identically.
 import numpy as np
 import pandas as pd
 import joblib
-import torch
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except Exception:
+    TORCH_AVAILABLE = False
 from pathlib import Path
 
 from src.features import engineer_features, FEATURE_COLUMNS
@@ -38,7 +42,7 @@ def load_models():
 
     lstm_path   = MODELS_DIR / 'lstm.pt'
     config_path = MODELS_DIR / 'lstm_config.joblib'
-    if lstm_path.exists() and config_path.exists():
+    if TORCH_AVAILABLE and lstm_path.exists() and config_path.exists():
         cfg  = joblib.load(config_path)
         lstm = FraudLSTM(
             input_size=cfg['input_size'],
@@ -83,10 +87,10 @@ def predict_single(transaction: dict, models: dict) -> dict:
     results = {}
 
     # ── Isolation Forest ──────────────────────────────────────────────────────
-    if models.get('iso_forest') and models.get('scaler'):
-        X_scaled = models['scaler'].transform(X)
-        raw      = models['iso_forest'].predict(X_scaled)
-        score    = -models['iso_forest'].decision_function(X_scaled)[0]
+    if models.get('iso_forest') is not None:
+        # Isolation Forest was trained on RAW (unscaled) features
+        raw      = models['iso_forest'].predict(X)
+        score    = -models['iso_forest'].decision_function(X)[0]
         # Normalise score to a rough probability (not perfectly calibrated)
         prob_iso = float(np.clip((score + 0.5) / 1.0, 0, 1))
         results['Isolation Forest'] = {
@@ -108,7 +112,7 @@ def predict_single(transaction: dict, models: dict) -> dict:
         }
 
     # ── LSTM ──────────────────────────────────────────────────────────────────
-    if models.get('lstm') and models.get('scaler'):
+    if TORCH_AVAILABLE and models.get('lstm') is not None and models.get('scaler') is not None:
         X_scaled  = models['scaler'].transform(X)
         X_tensor  = torch.tensor(X_scaled, dtype=torch.float32).unsqueeze(2)  # (1, features, 1)
         with torch.no_grad():
@@ -139,9 +143,9 @@ def predict_batch(df: pd.DataFrame, models: dict) -> pd.DataFrame:
 
     probas = {}
 
-    if models.get('iso_forest') and models.get('scaler'):
-        X_s = models['scaler'].transform(X)
-        scores = -models['iso_forest'].decision_function(X_s)
+    if models.get('iso_forest') is not None:
+        # Isolation Forest was trained on RAW (unscaled) features
+        scores = -models['iso_forest'].decision_function(X)
         probas['iso_forest_prob'] = np.clip((scores + 0.5), 0, 1)
 
     if models.get('xgboost'):
@@ -151,7 +155,7 @@ def predict_batch(df: pd.DataFrame, models: dict) -> pd.DataFrame:
         except Exception:
             probas['xgboost_prob'] = models['xgboost'].predict_proba(X)[:, 1]
 
-    if models.get('lstm') and models.get('scaler'):
+    if TORCH_AVAILABLE and models.get('lstm') is not None and models.get('scaler') is not None:
         X_s      = models['scaler'].transform(X)
         X_tensor = torch.tensor(X_s, dtype=torch.float32).unsqueeze(2)
         with torch.no_grad():

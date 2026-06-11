@@ -74,11 +74,10 @@ def evaluate_all_models(results: dict) -> dict:
     feature_names = results.get('feature_names')
 
     # Get predictions from each model
-    iso_pred,  iso_proba  = predict_isolation_forest(results['iso_forest'], X_test_scaled)
+    # Isolation Forest uses RAW (unscaled) features, matching how it was trained.
+    iso_pred,  iso_proba  = predict_isolation_forest(results['iso_forest'], X_test)
     xgb_pred,  xgb_proba  = predict_xgboost(results['xgboost'], X_test, feature_names=feature_names)
-    lstm_pred, lstm_proba = predict_lstm(results['lstm'], X_test_scaled)
-
-    return {
+    out = {
         'Isolation Forest': {
             'metrics':  compute_metrics(y_test, iso_pred, iso_proba),
             'y_pred':   iso_pred,
@@ -91,13 +90,19 @@ def evaluate_all_models(results: dict) -> dict:
             'y_proba':  xgb_proba,
             'y_test':   y_test,
         },
-        'LSTM': {
+    }
+
+    # LSTM is optional (requires torch). Only evaluate it if it was trained.
+    if results.get('lstm') is not None:
+        lstm_pred, lstm_proba = predict_lstm(results['lstm'], X_test_scaled)
+        out['LSTM'] = {
             'metrics':  compute_metrics(y_test, lstm_pred, lstm_proba),
             'y_pred':   lstm_pred,
             'y_proba':  lstm_proba,
             'y_test':   y_test,
-        },
-    }
+        }
+
+    return out
 
 
 # ─────────────────────────────────────────────

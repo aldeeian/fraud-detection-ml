@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        # The fast test suite only needs the data + feature stack, not torch,
+        # so CI stays quick. (torch is only required to train the LSTM.)
+        run: |
+          pip install numpy pandas scikit-learn xgboost imbalanced-learn pytest
+
+      - name: Run tests
+        run: pytest tests/ -v

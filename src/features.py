@@ -33,8 +33,11 @@ FEATURE_COLUMNS = [
     'amount_to_balance_ratio',
     'is_high_amount',
     'hour_of_day',
-    'is_flagged',
 ]
+# NOTE: 'isFlaggedFraud' is intentionally NOT a feature. In this dataset it is
+# derived from the fraud label itself, so feeding it to the model would be label
+# leakage — the model would "predict" fraud by reading a column that already
+# encodes the answer. It is kept in the raw data for display only.
 
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:

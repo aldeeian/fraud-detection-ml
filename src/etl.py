@@ -71,9 +71,27 @@ def generate_synthetic_data(n_rows: int = 100_000, random_state: int = 42) -> pd
     old_balance_orig = np.exp(rng.normal(loc=7.5, scale=2.5, size=n_rows)).round(2)
     old_balance_dest = np.exp(rng.normal(loc=6.0, scale=2.5, size=n_rows)).round(2)
 
-    # Normal transactions reduce sender balance by amount (can't go negative)
+    # Normal transactions reduce sender balance by amount (can't go negative).
     new_balance_orig = np.maximum(0, old_balance_orig - amounts).round(2)
     new_balance_dest = (old_balance_dest + amounts).round(2)
+
+    # Real-world messiness: balances don't reconcile to the cent. Fees, pending
+    # transactions, rounding and reporting lag mean the "expected" balance and the
+    # recorded balance differ slightly even for legitimate transactions. Without
+    # this noise the engineered balance-difference features become a perfect
+    # (leaky) separator and every model scores a fake 1.0 AUC.
+    orig_noise = rng.normal(0, 0.02, size=n_rows) * new_balance_orig
+    dest_noise = rng.normal(0, 0.02, size=n_rows) * new_balance_dest
+    new_balance_orig = np.maximum(0, new_balance_orig + orig_noise).round(2)
+    new_balance_dest = np.maximum(0, new_balance_dest + dest_noise).round(2)
+
+    # PaySim quirk: a large share of accounts report 0 balance (unknown/merchant
+    # accounts). This adds genuine ambiguity the model must work through.
+    zero_orig = rng.random(n_rows) < 0.10
+    new_balance_orig[zero_orig] = 0.0
+    zero_dest = rng.random(n_rows) < 0.10
+    old_balance_dest[zero_dest] = 0.0
+    new_balance_dest[zero_dest] = 0.0
 
     # ── 6. Fraud labels ───────────────────────────────────────────────────────
     # ~1.3% fraud rate, but ONLY in TRANSFER and CASH_OUT (PaySim finding)
@@ -86,11 +104,62 @@ def generate_synthetic_data(n_rows: int = 100_000, random_state: int = 42) -> pd
     fraud_idx = rng.choice(eligible_idx, size=n_fraud, replace=False)
     is_fraud[fraud_idx] = 1
 
-    # ── 7. Apply fraud balance pattern ───────────────────────────────────────
-    # KEY INSIGHT: fraudsters drain accounts to 0 before moving money.
-    # This "balance zeroing" is one of the strongest fraud signals.
-    new_balance_orig[fraud_idx] = 0.0
-    old_balance_orig[fraud_idx] = amounts[fraud_idx]  # old balance ≈ the amount stolen
+    # ── 7. Apply fraud balance pattern (realistic, not perfect) ──────────────
+    # Fraudsters TEND to drain accounts, but real data is noisy: partial drains,
+    # rounding, fees, and timing mean the "balance zeroing" signal is strong but
+    # NOT a perfect giveaway. If we set newbalance to exactly 0 and oldbalance to
+    # exactly the amount, the model learns a trivial rule and scores a fake 1.0
+    # AUC (classic data leakage). We add realism instead:
+    #
+    #   - ~70% of frauds drain MOST (but not all) of the balance, leaving a small
+    #     random remainder
+    #   - the stolen amount is close to, but not exactly, the old balance
+    #   - ~15% of NORMAL transfers also happen to zero out a balance (legit people
+    #     do empty their accounts), so "balance == 0" alone is not proof of fraud
+    n_fraud_actual = len(fraud_idx)
+
+    # Split fraud into two behaviour profiles, mirroring reality:
+    #
+    #   TYPICAL (~75%): large transfers that drain the account. Real PaySim
+    #   fraud amounts are much larger than everyday payments, and fraudsters
+    #   move most of the balance. These are catchable, even by an unsupervised
+    #   anomaly detector.
+    #
+    #   STEALTHY (~25%): normal-sized amounts with balances that reconcile,
+    #   indistinguishable from legitimate transfers on these features alone.
+    #   These are why recall is never 100% in production and why this dataset
+    #   cannot be perfectly separated (no leakage).
+    n_stealth   = int(0.25 * n_fraud_actual)
+    stealth_sel = rng.choice(n_fraud_actual, size=n_stealth, replace=False)
+    stealth_idx = fraud_idx[stealth_sel]
+    typical_idx = np.setdiff1d(fraud_idx, stealth_idx)
+
+    # Typical fraud: large amounts drawn from a higher log-normal
+    n_typ = len(typical_idx)
+    amounts[typical_idx] = np.exp(
+        rng.normal(loc=11.0, scale=1.2, size=n_typ)
+    ).clip(1_000, 10_000_000).round(2)
+
+    drain_frac = rng.uniform(0.85, 1.0, size=n_typ)   # drain 85–100%
+    old_bal    = amounts[typical_idx] * rng.uniform(0.9, 1.4, size=n_typ)
+    old_balance_orig[typical_idx] = old_bal.round(2)
+    new_balance_orig[typical_idx] = np.maximum(
+        0.0, old_bal * (1.0 - drain_frac)
+    ).round(2)
+
+    # Stealthy fraud: keep the normal amount, make balances reconcile
+    new_balance_orig[stealth_idx] = np.maximum(
+        0, old_balance_orig[stealth_idx] - amounts[stealth_idx]
+    ).round(2)
+
+    # Inject legitimate account-draining transfers so zero-balance isn't a tell
+    legit_transfer_idx = np.where(
+        eligible_mask & (is_fraud == 0)
+    )[0]
+    if len(legit_transfer_idx) > 0:
+        n_legit_drain = int(0.15 * len(legit_transfer_idx))
+        drain_legit = rng.choice(legit_transfer_idx, size=n_legit_drain, replace=False)
+        new_balance_orig[drain_legit] = 0.0
 
     # ── 8. isFlaggedFraud — system's rule-based flag ──────────────────────────
     # In real PaySim, only transfers > 200,000 are flagged. Most fraud slips through.

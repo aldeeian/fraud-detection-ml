@@ -10,6 +10,8 @@ imbalanced-learn>=0.11.0
 
 # Deep learning (PyTorch - CPU version, works on all Windows machines)
 # If you have an NVIDIA GPU, replace with: pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch is OPTIONAL. The LSTM is skipped if torch is missing; everything else works.
+# CPU install: pip install torch --index-url https://download.pytorch.org/whl/cpu
 torch>=2.1.0
 
 # Dashboard and visualization
