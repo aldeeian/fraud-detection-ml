@@ -326,6 +326,11 @@ with tab2:
 
         # ── Per-model confusion matrices ─────────────────────────────────────
         st.subheader("Confusion Matrices")
+        st.caption(
+            "Each cell shows the count, the share of that row, and what it means. "
+            "Colors are normalised per row so the rare fraud class stays visible. "
+            "The bottom row is the one that matters: Caught = fraud detected, Missed = fraud that got through."
+        )
         cols = st.columns(len(eval_results))
         for i, (model_name, result) in enumerate(eval_results.items()):
             with cols[i]:

@@ -111,31 +111,51 @@ def evaluate_all_models(results: dict) -> dict:
 
 def plot_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, model_name: str):
     """
-    Create an interactive Plotly confusion matrix heatmap.
+    Create a clean, readable Plotly confusion matrix.
 
-    A confusion matrix shows:
-      - True Positives  (top-left):  fraud correctly caught
-      - False Positives (top-right): legit flagged as fraud
-      - False Negatives (bottom-left): fraud missed
-      - True Negatives  (bottom-right): legit correctly cleared
+    Design notes:
+      - Colors are normalised PER ROW. With 1.3% fraud, raw counts make the
+        fraud row invisible (3,900 vs 48). Row percentages keep every cell
+        readable and meaningful ("of all actual frauds, what share went where").
+      - Each cell shows the count, the row percentage, and what the cell means
+        (Caught, Missed, False Alarm, Cleared).
+      - No colorbar: it added clutter without information.
     """
     cm = confusion_matrix(y_true, y_pred)
-    labels = ['Not Fraud', 'Fraud']
+    row_sums = cm.sum(axis=1, keepdims=True)
+    row_pct  = cm / np.maximum(row_sums, 1)
+
+    # Meaning of each cell: rows = actual [not fraud, fraud], cols = predicted
+    meaning = [['Cleared', 'False Alarm'],
+               ['Missed',  'Caught']]
+
+    cell_text = [
+        [f"<b>{cm[r][c]:,}</b><br>{row_pct[r][c]:.1%}<br>{meaning[r][c]}"
+         for c in range(2)]
+        for r in range(2)
+    ]
 
     fig = go.Figure(data=go.Heatmap(
-        z=cm,
-        x=[f'Predicted {l}' for l in labels],
-        y=[f'Actual {l}'    for l in labels],
+        z=row_pct,
+        x=['Predicted<br>Not Fraud', 'Predicted<br>Fraud'],
+        y=['Actual<br>Not Fraud', 'Actual<br>Fraud'],
         colorscale='Blues',
-        text=cm,
+        zmin=0.0, zmax=1.0,
+        text=cell_text,
         texttemplate='%{text}',
-        textfont={'size': 18},
-        showscale=True,
+        textfont={'size': 13},
+        showscale=False,
+        xgap=4, ygap=4,
+        hovertemplate='%{y} / %{x}<br>count: %{customdata:,}<extra></extra>',
+        customdata=cm,
     ))
     fig.update_layout(
-        title=f'Confusion Matrix — {model_name}',
-        height=350,
-        margin=dict(t=50, b=50),
+        title={'text': f'<b>{model_name}</b>', 'x': 0.5, 'xanchor': 'center',
+               'font': {'size': 15}},
+        height=320,
+        margin=dict(t=45, b=10, l=10, r=10),
+        xaxis=dict(side='bottom', tickfont={'size': 11}, automargin=True),
+        yaxis=dict(tickfont={'size': 11}, automargin=True, autorange='reversed'),
     )
     return fig
 
