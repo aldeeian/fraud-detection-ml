@@ -127,7 +127,12 @@ if load_btn:
         for key in ['train_results', 'eval_results']:
             st.session_state.pop(key, None)
 
-    st.success(f"Loaded {len(df):,} transactions.")
+    # The sidebar was rendered BEFORE the data existed, so the Train button is
+    # still disabled on this run. Rerun so it re-renders enabled immediately.
+    st.rerun()
+
+if 'df' in st.session_state and 'train_results' not in st.session_state and not train_btn:
+    st.success(f"Loaded {len(st.session_state['df']):,} transactions. Ready to train.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,17 +146,15 @@ if train_btn and 'df' in st.session_state:
 
     progress_bar = st.progress(0, text="Starting training...")
 
-    with st.spinner("Training Isolation Forest (1/3)..."):
-        # We train all at once using train_all(); progress is approximate
-        progress_bar.progress(10, text="Training Isolation Forest...")
+    # train_all reports real progress (including per-epoch LSTM updates)
+    results = train_all(
+        X, y, feature_names=FEATURE_COLUMNS,
+        progress_callback=lambda frac, text: progress_bar.progress(frac, text=text),
+    )
 
-    with st.spinner("Training all models — this may take 1-3 minutes..."):
-        results = train_all(X, y, feature_names=FEATURE_COLUMNS)
-        progress_bar.progress(80, text="Evaluating models...")
-
-    with st.spinner("Evaluating on test set..."):
-        eval_results = evaluate_all_models(results)
-        progress_bar.progress(100, text="Done!")
+    progress_bar.progress(0.92, text="Evaluating on test set...")
+    eval_results = evaluate_all_models(results)
+    progress_bar.progress(1.0, text="Done!")
 
     st.session_state['train_results'] = results
     st.session_state['eval_results']  = eval_results
@@ -390,11 +393,12 @@ with tab4:
         st.markdown("**Quick examples** (click to fill the form):")
         pcol1, pcol2, pcol3 = st.columns(3)
         if pcol1.button("🚨 Typical fraud", use_container_width=True,
-                        help="Large transfer that drains the sender's account"):
+                        help="Large cash-out that drains most of the sender's balance; "
+                             "the mule account's recorded balance doesn't reflect the money"):
             st.session_state.update({
-                "p_step": 420, "p_type": "TRANSFER", "p_amount": 250000.0,
-                "p_old_orig": 260000.0, "p_new_orig": 0.0,
-                "p_old_dest": 0.0, "p_new_dest": 250000.0,
+                "p_step": 420, "p_type": "CASH_OUT", "p_amount": 190000.0,
+                "p_old_orig": 205000.0, "p_new_orig": 18500.0,
+                "p_old_dest": 400.0, "p_new_dest": 750.0,
             })
         if pcol2.button("✅ Normal payment", use_container_width=True,
                         help="Small everyday payment, balances reconcile"):
@@ -426,7 +430,7 @@ with tab4:
             with col2:
                 t_old_orig = st.number_input("Sender Old Balance ($)", min_value=0.0, value=5000.0, step=100.0, key="p_old_orig")
                 t_new_orig = st.number_input("Sender New Balance ($)", min_value=0.0, value=0.0, step=100.0,
-                                              help="Set to 0 to simulate a fraud pattern (account drained)",
+                                              help="Fraud typically drains 85-100% of the balance, leaving a small remainder",
                                               key="p_new_orig")
                 t_name_dest   = st.text_input("Recipient Account (nameDest)", value="C987654321")
                 t_old_dest    = st.number_input("Recipient Old Balance ($)", min_value=0.0, value=0.0, step=100.0, key="p_old_dest")
